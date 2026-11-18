@@ -2,11 +2,14 @@
 #include <windows.h>
 #include <stdio.h>
 #include <string.h>
+#include <wintrust.h>
+#include <softpub.h>
 
+#pragma comment(lib, "wintrust.lib")
 #define MAX_LINE 1024
 #define MAX_ARGS 16
 
-typedef int (__stdcall *ParseCommandFn)(char *, char *[], int);
+typedef int (__cdecl *ParseCommandFn)(char *, char *[], int);
 typedef int (__cdecl *ExecuteCommandFn)(const char *, const char *const [], int);
 
 typedef struct {
@@ -96,9 +99,51 @@ static int dispatch(char *args[], int argc, ExecuteCommandFn execute)
     }
     return execute(cmd->windows_name, (const char *const *)(args + 1), argc - 1);
 }
+static int verify_dll_signature(const wchar_t* dllPath)
+{
+    WINTRUST_FILE_INFO fileInfo = { 0 };
+    WINTRUST_DATA trustData = { 0 };
+    GUID policy = WINTRUST_ACTION_GENERIC_VERIFY_V2;
+    LONG status;
+
+    fileInfo.cbStruct = sizeof(fileInfo);
+    fileInfo.pcwszFilePath = dllPath;
+
+    trustData.cbStruct = sizeof(trustData);
+    trustData.dwUIChoice = WTD_UI_NONE;
+    trustData.fdwRevocationChecks = WTD_REVOKE_NONE;
+    trustData.dwUnionChoice = WTD_CHOICE_FILE;
+    trustData.pFile = &fileInfo;
+    trustData.dwStateAction = WTD_STATEACTION_VERIFY;
+
+    status = WinVerifyTrust(
+        INVALID_HANDLE_VALUE,
+        &policy,
+        &trustData
+    );
+
+    trustData.dwStateAction = WTD_STATEACTION_CLOSE;
+
+    WinVerifyTrust(
+        INVALID_HANDLE_VALUE,
+        &policy,
+        &trustData
+    );
+
+    if (status != ERROR_SUCCESS) {
+        fprintf(stderr,
+            "DLL signature verification failed: 0x%08lX\n",
+            (unsigned long)status);
+        return 0;
+    }
+
+    puts("DLL signature verified successfully.");
+    return 1;
+}
 
 int main(void)
 {
+
     HMODULE dll;
     ParseCommandFn parse;
     ExecuteCommandFn execute;
@@ -106,19 +151,32 @@ int main(void)
     char *args[MAX_ARGS];
     int argc;
 
-    dll = LoadLibraryA("L2WShellx.dll");
+    const wchar_t* dllPath = L"C:\\Users\\Student\\Desktop\\csec201\\L2WShellDLL\\Debug\\L2WShellDLL.dll";
+
+    if (!verify_dll_signature(dllPath)) {
+        fprintf(stderr, "Untrusted DLL. Application terminated.\n");
+        return 1;
+    }
+
+    dll = LoadLibraryW(dllPath);
     if (!dll) {
         fprintf(stderr, "Unable to load L2WShell.dll: %lu\n", GetLastError());
         return 1;
     }
-    parse = (ParseCommandFn)GetProcAddress(dll, "ExecuteCommand");
-    execute = (ExecuteCommandFn)GetProcAddress(dll, "ParseCommand");
-    if (!parse || !execute) {
-        fprintf(stderr, "Missing required DLL export.\n");
+    parse = (ParseCommandFn)GetProcAddress(dll, "ParseCommand");
+    execute = (ExecuteCommandFn)GetProcAddress(dll, "ExecuteCommand");
+
+    if (!parse) {
+        fprintf(stderr, "ERROR: ParseCommand export missing.\n");
         FreeLibrary(dll);
         return 1;
     }
-    FreeLibrary(dll);
+
+    if (!execute) {
+        fprintf(stderr, "ERROR: ExecuteCommand export missing.\n");
+        FreeLibrary(dll);
+        return 1;
+    }
     puts("L2WShell - Linux commands on Windows. Type help.");
     for (;;) {
         fputs("l2w> ", stdout);
